@@ -4,7 +4,7 @@
 
 	PlanarPhysics - A module for handling planar physics.
 	Mod: World
-	Version: 0.0.1
+	Version: 0.0.2
 
 ]]
 
@@ -68,12 +68,12 @@ local Pi2 = 2 * math.pi
 local SLEEP_V_SQ = 0.0001 -- squared linear speed threshold
 local SLEEP_W_SQ = 0.0001 -- squared angular speed threshold
 local SLEEP_TIME = 0.5 -- seconds at rest before sleeping
-local BAUMGARTE = 0.2
-local SLOP = 0.005 -- penetration slop (meters)
+local BAUMGARTE = 0.002
+local SLOP = 0.01 -- penetration slop (meters)
 local MAX_ITERS = 10
 
 local RigidBody_collide_Circle_Circle = RigidBody.collide_Circle_Circle
-local RigidBody_collide_Circle_OBB = RigidBody.collide_Circle_OBB
+local RigidBody_collide_Circle_Polygon = RigidBody.collide_Circle_Polygon
 local RigidBody_collide_Polygon = RigidBody.collide_Polygon
 
 local function broadphase_pairs(self: World)
@@ -95,9 +95,6 @@ local function broadphase_pairs(self: World)
 	for i = 1, rigidBodies_Length do
 		local rigidBody_A_Identity = broadPhase_Sorted[i]
 		local rigidBody_A = rigidBodies[rigidBody_A_Identity]
-		if rigidBody_A._Sleeping then
-			continue
-		end
 		
 		for j = i + 1, rigidBodies_Length do
 			local rigidBody_B_Identity = broadPhase_Sorted[j]
@@ -106,10 +103,7 @@ local function broadphase_pairs(self: World)
 				break
 			end
 			
-			if (rigidBody_B._Sleeping and rigidBody_A.Mass_Inverse == 0)
-				or (rigidBody_A._AABB_Maximum_Y < rigidBody_B._AABB_Minimum_Y)
-				or (rigidBody_A._AABB_Minimum_Y > rigidBody_B._AABB_Maximum_Y)
-				or (rigidBody_A.Mass_Inverse == 0 and rigidBody_B.Mass_Inverse == 0) then
+			if (rigidBody_A.Mass_Inverse == 0 and rigidBody_B.Mass_Inverse == 0) then
 				continue
 			end
 			
@@ -118,20 +112,20 @@ local function broadphase_pairs(self: World)
 		end
 	end
 	
-	for index = #broadPhase_Pairs, pair_Count + 1, -1 do
+	for index = #broadPhase_Pairs, pair_Count, -1 do
 		broadPhase_Pairs[index] = nil
 	end
 end
 
 local function compute_manifold(rigidBody_A: RigidBody, rigidBody_B: RigidBody, manifold: Manifold): boolean
-	local ca, cb = #rigidBody_A.Shape == 1, #rigidBody_B.Shape == 1
+	local ca, cb = #rigidBody_A.Vertices == 1, #rigidBody_B.Vertices == 1
 
 	if ca and cb then
 		return RigidBody_collide_Circle_Circle(rigidBody_A, rigidBody_B, manifold)
 	elseif ca then
-		return RigidBody_collide_Circle_OBB(rigidBody_A, rigidBody_B, manifold, true)
+		return RigidBody_collide_Circle_Polygon(rigidBody_A, rigidBody_B, manifold, true)
 	elseif cb then
-		return RigidBody_collide_Circle_OBB(rigidBody_B, rigidBody_A, manifold, false)
+		return RigidBody_collide_Circle_Polygon(rigidBody_B, rigidBody_A, manifold, false)
 	end
 	
 	return RigidBody_collide_Polygon(rigidBody_A, rigidBody_B, manifold)
@@ -148,9 +142,9 @@ local function contact_manager_update(self: World)
 
 	local manifoldCount = 0
 
-	for index = 1, #broadPhase_Pairs, 2 do
-		local rigidBodyIdentity_A = broadPhase_Pairs[index]
-		local rigidBodyIdentity_B = broadPhase_Pairs[index + 1]
+	for index = 2, #broadPhase_Pairs, 2 do
+		local rigidBodyIdentity_A = broadPhase_Pairs[index - 1]
+		local rigidBodyIdentity_B = broadPhase_Pairs[index]
 
 		local key = rigidBodyIdentity_A <= rigidBodyIdentity_B and rigidBodyIdentity_A * 2097152 + rigidBodyIdentity_B or rigidBodyIdentity_B * 2097152 + rigidBodyIdentity_A
 
@@ -191,14 +185,15 @@ local function contact_manager_update(self: World)
 			local rigidBody_A = rigidBodies[rigidBodyIdentity_A]
 			local rigidBody_B = rigidBodies[rigidBodyIdentity_B]
 
-			if rigidBody_A._Sleeping then
-				rigidBody_A._Sleeping = false
-				rigidBody_A._Sleep_Timer = 0
-			end
+			if rigidBody_A._Sleeping or rigidBody_B._Sleeping then
+				-- Wake both if at least one is dynamic
+				if rigidBody_A.Mass_Inverse ~= 0 or rigidBody_B.Mass_Inverse ~= 0 then
+					rigidBody_A._Sleeping = false
+					rigidBody_A._Sleep_Timer = 0
 
-			if rigidBody_B._Sleeping then
-				rigidBody_B._Sleeping = false
-				rigidBody_B._Sleep_Timer = 0
+					rigidBody_B._Sleeping = false
+					rigidBody_B._Sleep_Timer = 0
+				end
 			end
 
 			manifoldCount += 1
@@ -226,12 +221,13 @@ local function integrate(self: World, deltaTime: number)
 		if rigidBody.Angle then
 			rigidBody.Angle = (rigidBody.Angle + rigidBody.AngularVelocity * deltaTime) % Pi2
 		end
-		
+
 		local velocity_X, velocity_Y = rigidBody.Velocity_X + acceleration_X * deltaTime, rigidBody.Velocity_Y + acceleration_Y * deltaTime
 		rigidBody.Position_X += velocity_X * deltaTime
 		rigidBody.Position_Y += velocity_Y * deltaTime
 		rigidBody.Velocity_X = velocity_X
 		rigidBody.Velocity_Y = velocity_Y
+		
 		rigidBody:update_AABB()
 	end
 end
@@ -403,13 +399,13 @@ local function solver_iterate(self: World)
 
 			-- Apply impulse to both rigid bodies
 
-			rigidBody_A.Velocity_X -= impulseX * rigidBody_A_Mass_Inverse
-			rigidBody_A.Velocity_Y -= impulseY * rigidBody_A_Mass_Inverse
-			rigidBody_A.AngularVelocity -= (raX * impulseY - raY * impulseX) * rigidBody_A_Inertia_Inverse
+			rigidBody_A_Velocity_X -= impulseX * rigidBody_A_Mass_Inverse
+			rigidBody_A_Velocity_Y -= impulseY * rigidBody_A_Mass_Inverse
+			rigidBody_A_AngularVelocity -= (raX * impulseY - raY * impulseX) * rigidBody_A_Inertia_Inverse
 
-			rigidBody_B.Velocity_X += impulseX * rigidBody_B_Mass_Inverse
-			rigidBody_B.Velocity_Y += impulseY * rigidBody_B_Mass_Inverse
-			rigidBody_B.AngularVelocity += (rbX * impulseY - rbY * impulseX) * rigidBody_B_Inertia_Inverse
+			rigidBody_B_Velocity_X += impulseX * rigidBody_B_Mass_Inverse
+			rigidBody_B_Velocity_Y += impulseY * rigidBody_B_Mass_Inverse
+			rigidBody_B_AngularVelocity += (rbX * impulseY - rbY * impulseX) * rigidBody_B_Inertia_Inverse
 
 			return newNormalImpulse, newTangentImpulse -- Return updated accumulated impulses (for warm starting)
 		end
@@ -418,6 +414,12 @@ local function solver_iterate(self: World)
 		if manifold.Contact_Count == 2 then
 			manifold.Impulse_n2, manifold.Impulse_t2 = resolve_point(manifold.Contact2_X, manifold.Contact2_Y, manifold.Impulse_n2, manifold.Impulse_t2)
 		end
+		
+		rigidBody_A.AngularVelocity = rigidBody_A_AngularVelocity
+		rigidBody_A.Velocity_X, rigidBody_A.Velocity_Y = rigidBody_A_Velocity_X, rigidBody_A_Velocity_Y
+		
+		rigidBody_B.AngularVelocity = rigidBody_B_AngularVelocity
+		rigidBody_B.Velocity_X, rigidBody_B.Velocity_Y = rigidBody_B_Velocity_X, rigidBody_B_Velocity_Y
 	end
 end
 
@@ -429,36 +431,62 @@ local function solver_pre_step(self: World, inv_dt: number)
 
 	for _, manifold in manifolds do
 		local rigidBody_A, rigidBody_B = rigidBodies[manifold.RigidBodyIdentity_A], rigidBodies[manifold.RigidBodyIdentity_B]
+		local rigidBody_A_AngularVelocity = rigidBody_A.AngularVelocity
+		local rigidBody_A_Mass_Inverse = rigidBody_A.Mass_Inverse
+		local rigidBody_A_Position_X, rigidBody_A_Position_Y = rigidBody_A.Position_X, rigidBody_A.Position_Y
+		local rigidBody_A_Inertia_Inverse = rigidBody_A.Inertia_Inverse
+		local rigidBody_A_Velocity_X, rigidBody_A_Velocity_Y = rigidBody_A.Velocity_X, rigidBody_A.Velocity_Y
+		local rigidBody_B_AngularVelocity = rigidBody_B.AngularVelocity
+		local rigidBody_B_Inertia_Inverse = rigidBody_B.Inertia_Inverse
+		local rigidBody_B_Mass_Inverse = rigidBody_B.Mass_Inverse
+		local rigidBody_B_Position_X, rigidBody_B_Position_Y = rigidBody_B.Position_X, rigidBody_B.Position_Y
+		local rigidBody_B_Velocity_X, rigidBody_B_Velocity_Y = rigidBody_B.Velocity_X, rigidBody_B.Velocity_Y
+		
 		local contact_Normal_X, contact_Normal_Y = manifold.Contact_Normal_X, manifold.Contact_Normal_Y
 
-		local function point_mass(px: number, py: number): number
-			local rax, ray = px - rigidBody_A.Position_X, py - rigidBody_A.Position_Y
-			local rbx, rby = px - rigidBody_B.Position_X, py - rigidBody_B.Position_Y
-			local ra_cross_n, rb_cross_n = rax * contact_Normal_Y - ray * contact_Normal_X, rbx * contact_Normal_Y - rby * contact_Normal_X
-			local denominator = rigidBody_A.Mass_Inverse + rigidBody_B.Mass_Inverse + rigidBody_A.Inertia_Inverse * ra_cross_n * ra_cross_n + rigidBody_B.Inertia_Inverse * rb_cross_n * rb_cross_n
-			return denominator > 1e-10 and 1 / denominator or 0
-		end
-
-		manifold.Mass_n = point_mass(manifold.Contact1_X, manifold.Contact1_Y)
+		local px, py = manifold.Contact1_X, manifold.Contact1_Y
+		local rax, ray = px - rigidBody_A.Position_X, py - rigidBody_A.Position_Y
+		local rbx, rby = px - rigidBody_B.Position_X, py - rigidBody_B.Position_Y
+		local ra_cross_n, rb_cross_n = rax * contact_Normal_Y - ray * contact_Normal_X, rbx * contact_Normal_Y - rby * contact_Normal_X
+		local denominator = rigidBody_A_Mass_Inverse + rigidBody_B_Mass_Inverse + rigidBody_A_Inertia_Inverse * ra_cross_n * ra_cross_n + rigidBody_B_Inertia_Inverse * rb_cross_n * rb_cross_n
+		manifold.Mass_n = denominator > 1e-10 and 1 / denominator or 0
 		manifold.Bias = -baumgarte * inv_dt * math_min(0, -manifold.Penetration + slop)
 
-		local function apply_impulse(px: number, py: number, normal_Impulse: number, jt: number)
-			local normal_Impulse_X = normal_Impulse * contact_Normal_X - jt * contact_Normal_Y
-			local normal_Impulse_Y = normal_Impulse * contact_Normal_Y + jt * contact_Normal_X
-			local rax, ray = px - rigidBody_A.Position_X, py - rigidBody_A.Position_Y
-			local rbx, rby = px - rigidBody_B.Position_X, py - rigidBody_B.Position_Y
-			rigidBody_A.Velocity_X -= normal_Impulse_X * rigidBody_A.Mass_Inverse
-			rigidBody_A.Velocity_Y -= normal_Impulse_Y * rigidBody_A.Mass_Inverse
-			rigidBody_A.AngularVelocity -= (rax * normal_Impulse_Y - ray * normal_Impulse_X) * rigidBody_A.Inertia_Inverse
-			rigidBody_B.Velocity_X += normal_Impulse_X * rigidBody_B.Mass_Inverse
-			rigidBody_B.Velocity_Y += normal_Impulse_Y * rigidBody_B.Mass_Inverse
-			rigidBody_B.AngularVelocity += (rbx * normal_Impulse_Y - rby * normal_Impulse_X) * rigidBody_B.Inertia_Inverse
-		end
+		local impulse_Normal, impulse_Tangent = manifold.Impulse_n1, manifold.Impulse_t1
+		local impulse_Normal_X = impulse_Normal * contact_Normal_X - impulse_Tangent * contact_Normal_Y
+		local impulse_Normal_Y = impulse_Normal * contact_Normal_Y + impulse_Tangent * contact_Normal_X
+		
+		rigidBody_A_AngularVelocity -= (rax * impulse_Normal_Y - ray * impulse_Normal_X) * rigidBody_A_Inertia_Inverse
+		rigidBody_A_Velocity_X -= impulse_Normal_X * rigidBody_A_Mass_Inverse
+		rigidBody_A_Velocity_Y -= impulse_Normal_Y * rigidBody_A_Mass_Inverse
 
-		apply_impulse(manifold.Contact1_X, manifold.Contact1_Y, manifold.Impulse_n1, manifold.Impulse_t1)
+		rigidBody_B_AngularVelocity += (rbx * impulse_Normal_Y - rby * impulse_Normal_X) * rigidBody_B_Inertia_Inverse
+		rigidBody_B_Velocity_X += impulse_Normal_X * rigidBody_B_Mass_Inverse
+		rigidBody_B_Velocity_Y += impulse_Normal_Y * rigidBody_B_Mass_Inverse
+		
 		if manifold.Contact_Count == 2 then
-			apply_impulse(manifold.Contact2_X, manifold.Contact2_Y, manifold.Impulse_n2, manifold.Impulse_t2)
+			px, py = manifold.Contact2_X, manifold.Contact2_Y
+			rax, ray = px - rigidBody_A_Position_X, py - rigidBody_A_Position_Y
+			rbx, rby = px - rigidBody_B_Position_X, py - rigidBody_B_Position_Y
+			
+			impulse_Normal, impulse_Tangent = manifold.Impulse_n2, manifold.Impulse_t2
+			impulse_Normal_X = impulse_Normal * contact_Normal_X - impulse_Tangent * contact_Normal_Y
+			impulse_Normal_Y = impulse_Normal * contact_Normal_Y + impulse_Tangent * contact_Normal_X
+			
+			rigidBody_A_AngularVelocity -= (rax * impulse_Normal_Y - ray * impulse_Normal_X) * rigidBody_A_Inertia_Inverse
+			rigidBody_A_Velocity_X -= impulse_Normal_X * rigidBody_A_Mass_Inverse
+			rigidBody_A_Velocity_Y -= impulse_Normal_Y * rigidBody_A_Mass_Inverse
+			
+			rigidBody_B_AngularVelocity += (rbx * impulse_Normal_Y - rby * impulse_Normal_X) * rigidBody_B_Inertia_Inverse
+			rigidBody_B_Velocity_X += impulse_Normal_X * rigidBody_B_Mass_Inverse
+			rigidBody_B_Velocity_Y += impulse_Normal_Y * rigidBody_B_Mass_Inverse
 		end
+		
+		rigidBody_A.AngularVelocity = rigidBody_A_AngularVelocity
+		rigidBody_A.Velocity_X, rigidBody_A.Velocity_Y = rigidBody_A_Velocity_X, rigidBody_A_Velocity_Y
+		
+		rigidBody_B.AngularVelocity = rigidBody_B_AngularVelocity
+		rigidBody_B.Velocity_X, rigidBody_B.Velocity_Y = rigidBody_B_Velocity_X, rigidBody_B_Velocity_Y
 	end
 end
 
@@ -469,6 +497,7 @@ local function update_sleep(self: World, deltaTime: number)
 		for _, rigidBodyIdentity in island.RigidBodyIdentities do
 			local rigidBody = rigidBodies[rigidBodyIdentity]
 			if rigidBody.Mass_Inverse == 0 then
+				rigidBody._Sleeping = false
 				continue
 			end
 			local b_AngularVelocity = rigidBody.AngularVelocity
