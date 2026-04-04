@@ -4,7 +4,7 @@
 
 	PlanarPhysics - A module for handling planar physics.
 	Mod: RigidBody
-	Version: 0.0.1
+	Version: 0.0.2
 
 ]]
 
@@ -22,14 +22,14 @@ type Manifold = Manifold.Manifold
 local Module = {}
 Module.__index = Module
 
-export type RigidBody = {
+export type RigidBody = typeof(setmetatable({} :: {
 	Angle: number,
 	AngularVelocity: number,
 	Friction_Kinetic: number, Friction_Static: number,
 	Inertia: number, Inertia_Inverse: number,
 	Mass: number, Mass_Inverse: number,
 	Position_X: number, Position_Y: number,
-	Shape: {number},
+	Vertices: {number},
 	Velocity_X: number, Velocity_Y: number,
 	
 	update_AABB: (self: RigidBody) -> (),
@@ -40,8 +40,8 @@ export type RigidBody = {
 	_Island_Identity: number,
 	_Sleeping: boolean,
 	_Sleep_Timer: number,
-	_Index: number -- position in world bodelta_Y list
-}
+	_Index: number
+}, Module))
 
 
 -- -- Helpers
@@ -63,20 +63,24 @@ local table_sort = table.sort
 
 -- -- Functions
 
--- Applocal_Ya force (accumulates into velocity for one step).
-function Module.apply_Force(self: RigidBody, fx: number, fy: number, deltaTime: number)
-	self.Velocity_X += fx * self.Mass_Inverse * deltaTime
-	self.Velocity_Y += fy * self.Mass_Inverse * deltaTime
+--[[
+	Apply a force to the RigidBody.
+]]
+function Module.apply_Force(self: RigidBody, force_X: number, force_Y: number, deltaTime: number)
+	self.Velocity_X += force_X * self.Mass_Inverse * deltaTime
+	self.Velocity_Y += force_Y * self.Mass_Inverse * deltaTime
 	self._Sleeping = false
 	self._Sleep_Timer = 0
 end
 
--- Applocal_Yan impulse (world space) at a world-space point.
-function Module.apply_Impulse(self: RigidBody, jx: number, jy: number, px: number, py: number)
-	local rx, ry = px - self.Position_X, py - self.Position_Y
-	self.AngularVelocity += (rx * jy - ry * jx) * self.Inertia_Inverse
-	self.Velocity_X += jx * self.Mass_Inverse
-	self.Velocity_Y += jy * self.Mass_Inverse
+--[[
+	Apply an impulse to the RigidBody at a given position.
+]]
+function Module.apply_Impulse(self: RigidBody, impulse_X: number, impulse_Y: number, position_X: number, position_Y: number)
+	local rx, ry = position_X - self.Position_X, position_Y - self.Position_Y
+	self.AngularVelocity += (rx * impulse_Y - ry * impulse_X) * self.Inertia_Inverse
+	self.Velocity_X += impulse_X * self.Mass_Inverse
+	self.Velocity_Y += impulse_Y * self.Mass_Inverse
 	self._Sleeping = false
 	self._Sleep_Timer = 0
 end
@@ -92,7 +96,7 @@ function Module.new_Circle(radius: number): RigidBody
 		Inertia = 1, Inertia_Inverse = 1,
 		Mass = 1, Mass_Inverse = 1,
 		Position_X = 0, Position_Y = 0,
-		Shape = {radius},
+		Vertices = {radius},
 		Velocity_X = 0, Velocity_Y = 0,
 		
 		update_AABB = Module.update_Circle_AABB,
@@ -106,12 +110,16 @@ function Module.new_Circle(radius: number): RigidBody
 	}, Module)
 end
 
-function Module.collide_Circle_Circle(circleA: RigidBody, circleB: RigidBody, manifold: Manifold): boolean
-	local delta_X, delta_Y = circleB.Position_X - circleA.Position_X, circleB.Position_Y - circleA.Position_Y
+--[[
+	Check collision between two circles.
+	returns: collided
+]]
+function Module.collide_Circle_Circle(self: RigidBody, circle: RigidBody, manifold: Manifold): boolean
+	local delta_X, delta_Y = circle.Position_X - self.Position_X, circle.Position_Y - self.Position_Y
 	local distanceSquared = delta_X * delta_X + delta_Y * delta_Y
 	
-	local a_Radius = circleA.Shape[1]
-	local combinedRadius = a_Radius + circleB.Shape[1]
+	local circleA_Radius = self.Vertices[1]
+	local combinedRadius = circleA_Radius + circle.Vertices[1]
 	
 	if distanceSquared >= combinedRadius * combinedRadius then
 		return false
@@ -129,28 +137,30 @@ function Module.collide_Circle_Circle(circleA: RigidBody, circleB: RigidBody, ma
 		manifold.Penetration = combinedRadius - distance
 	end
 
-	-- Single contact point at surface of A
-	manifold.Contact1_X = circleA.Position_X + manifold_Contact_Normal_X * a_Radius
-	manifold.Contact1_Y = circleA.Position_Y + manifold_Contact_Normal_Y * a_Radius
+	manifold.Contact1_X = self.Position_X + manifold_Contact_Normal_X * circleA_Radius
+	manifold.Contact1_Y = self.Position_Y + manifold_Contact_Normal_Y * circleA_Radius
 	manifold.Contact_Count = 1
-
 	manifold.Contact_Normal_X, manifold.Contact_Normal_Y = manifold_Contact_Normal_X, manifold_Contact_Normal_Y
 
 	return true
 end
 
-function Module.collide_Circle_OBB(circle: RigidBody, box: RigidBody, manifold: Manifold, circle_is_a: boolean): boolean
+--[[
+	Check collision between a circle and a polygon.
+	returns: collided
+]]
+function Module.collide_Circle_Polygon(self: RigidBody, polygon: RigidBody, manifold: Manifold, circle_is_a: boolean): boolean
 	-- Express circle centre in box local space
-	local box_Angle = box.Angle
-	local delta_X, delta_Y = circle.Position_X - box.Position_X, circle.Position_Y - box.Position_Y
+	local box_Angle = polygon.Angle
+	local delta_X, delta_Y = self.Position_X - polygon.Position_X, self.Position_Y - polygon.Position_Y
 	local cosine, sine = math_cos(box_Angle), math_sin(-box_Angle)
 	local local_X, local_Y= cosine * delta_X - sine * delta_Y, sine * delta_X + cosine * delta_Y
 
-	-- Find half-extents from shape vertices (flat [x1,y1,…])
-	local shape = box.Shape
+	-- Find half-extents from vertices (flat [x1,y1,…])
+	local vertices = polygon.Vertices
 	local hx, hy = 0, 0
-	for index = 1, #shape, 2 do
-		local ax, ay = math_abs(shape[index]), math_abs(shape[index + 1])
+	for index = 1, #vertices, 2 do
+		local ax, ay = math_abs(vertices[index]), math_abs(vertices[index + 1])
 		if ax > hx then hx = ax end
 		if ay > hy then hy = ay end
 	end
@@ -163,13 +173,13 @@ function Module.collide_Circle_OBB(circle: RigidBody, box: RigidBody, manifold: 
 	local fx = local_X - cx_clamped
 	local fy = local_Y- cy_clamped
 	local distanceSquared = fx * fx + fy * fy
-	local radius = circle.Shape[1]
+	local radius = self.Vertices[1]
 
 	if not inside and distanceSquared >= radius * radius then
 		return false
 	end
 
-	local nx_local, ny_local: number, number
+	local nx_local: number, ny_local: number
 	local penetration: number
 
 	if inside then
@@ -206,8 +216,8 @@ function Module.collide_Circle_OBB(circle: RigidBody, box: RigidBody, manifold: 
 	manifold.Contact_Normal_X, manifold.Contact_Normal_Y = manifold_Contact_Normal_X, manifold_Contact_Normal_Y
 
 	manifold.Penetration = penetration
-	manifold.Contact1_X = circle.Position_X + manifold_Contact_Normal_X * radius
-	manifold.Contact1_Y = circle.Position_Y + manifold_Contact_Normal_Y * radius
+	manifold.Contact1_X = self.Position_X + manifold_Contact_Normal_X * radius
+	manifold.Contact1_Y = self.Position_Y + manifold_Contact_Normal_Y * radius
 	manifold.Contact_Count = 1
 
 	return true
@@ -215,14 +225,14 @@ end
 
 function Module.update_Circle_AABB(self: RigidBody)
 	local position_X, position_Y = self.Position_X, self.Position_Y
-	local radius = self.Shape[1]
+	local radius = self.Vertices[1]
 	self._AABB_Maximum_X, self._AABB_Maximum_Y = position_X + radius, position_Y + radius
 end
 
 
 -- -- -- Polygon
 
-function Module.new_Polygon(shape: {number}): RigidBody
+function Module.new_Polygon(vertices: {number}): RigidBody
 	return setmetatable({
 		Angle = 0,
 		AngularVelocity = 0,
@@ -230,7 +240,7 @@ function Module.new_Polygon(shape: {number}): RigidBody
 		Inertia = 1, Inertia_Inverse = 1,
 		Mass = 1, Mass_Inverse = 1,
 		Position_X = 0, Position_Y = 0,
-		Shape = shape,
+		Vertices = vertices,
 		Velocity_X = 0, Velocity_Y = 0,
 
 		update_AABB = Module.update_Polygon_AABB,
@@ -245,7 +255,7 @@ function Module.new_Polygon(shape: {number}): RigidBody
 end
 
 -- Project polygon onto axis, return [min,max]
-local function project_poly(verts: { number }, ax: number, ay: number): (number, number)
+local function project(verts: {number}, ax: number, ay: number): (number, number)
 	local min_p, max_p = math_Huge, -math_Huge
 
 	for index = 1, #verts, 2 do
@@ -260,14 +270,13 @@ end
 
 -- Find best (least-penetrating) axis from one polygon against another.
 -- Returns: overlap, contact_Normal_X, contact_Normal_Y, edge_vertex_index
-local function best_axis(a_verts: { number }, b_verts: { number }): (number, number, number, number)
+local function best_axis(a_verts: {number}, b_verts: {number}): (number, number, number, number)
 	local length = #a_verts
 	local best_sep = -math_Huge
 	local best_nx = 0
 	local best_ny = 0
 	local best_edge = 1
-	for index = 1, length, 2 do
-		local j = (index % length) + 1
+	for index = 1, length - 2, 2 do
 		-- Compute edge normal
 		local ex = a_verts[index + 2] - a_verts[index]
 		-- Safe pair indexing
@@ -286,8 +295,8 @@ local function best_axis(a_verts: { number }, b_verts: { number }): (number, num
 		local contact_Normal_X = edge_y / len
 		local contact_Normal_Y = -edge_x / len
 
-		local a_min, a_max = project_poly(a_verts, contact_Normal_X, contact_Normal_Y)
-		local b_min, b_max = project_poly(b_verts, contact_Normal_X, contact_Normal_Y)
+		local a_min, a_max = project(a_verts, contact_Normal_X, contact_Normal_Y)
+		local b_min, b_max = project(b_verts, contact_Normal_X, contact_Normal_Y)
 		local sep = math_max(a_min - b_max, b_min - a_max)
 
 		if sep > 0 then
@@ -300,7 +309,79 @@ local function best_axis(a_verts: { number }, b_verts: { number }): (number, num
 			best_edge = index
 		end
 	end
+	
+	
+	local index = length - 1
+	
+	-- Compute edge normal
+	local ex = a_verts[index] - a_verts[1]
+	-- Safe pair indexing
+	local cur_x = a_verts[index]
+	local cur_y = a_verts[length]
+	local next_x = a_verts[1]
+	local next_y = a_verts[2]
+	local edge_x = next_x - cur_x
+	local edge_y = next_y - cur_y
+	-- Outward normal (right-hand)
+	local len = math_sqrt(edge_x * edge_x + edge_y * edge_y)
+	if len < 1e-10 then
+		return best_sep, best_nx, best_ny, best_edge
+	end
+	local contact_Normal_X = edge_y / len
+	local contact_Normal_Y = -edge_x / len
+
+	local a_min, a_max = project(a_verts, contact_Normal_X, contact_Normal_Y)
+	local b_min, b_max = project(b_verts, contact_Normal_X, contact_Normal_Y)
+	local sep = math_max(a_min - b_max, b_min - a_max)
+
+	if sep > 0 then
+		return sep, contact_Normal_X, contact_Normal_Y, index
+	end
+	if sep > best_sep then
+		best_sep = sep
+		best_nx = contact_Normal_X
+		best_ny = contact_Normal_Y
+		best_edge = index
+	end
+	
 	return best_sep, best_nx, best_ny, best_edge
+end
+
+local function findAxis(va: {number}, vb: {number}): (number, number, number, number)
+	local bestSep = -math_Huge
+	local bestNX, bestNY = 0, 0
+	local bestEdge = 1
+
+	for i = 1, #va, 2 do
+		local j = (i + 2 <= #va) and i + 2 or 1
+
+		local ex = va[j] - va[i]
+		local ey = va[j+1] - va[i+1]
+
+		local len = math_sqrt(ex*ex + ey*ey)
+		if len < 1e-8 then continue end
+
+		local nx = ey / len
+		local ny = -ex / len
+
+		local amin, amax = project(va, nx, ny)
+		local bmin, bmax = project(vb, nx, ny)
+
+		local sep = math_max(amin - bmax, bmin - amax)
+
+		if sep > 0 then
+			return sep, nx, ny, i -- separating axis
+		end
+
+		if sep > bestSep then
+			bestSep = sep
+			bestNX = nx
+			bestNY = ny
+			bestEdge = i
+		end
+	end
+
+	return bestSep, bestNX, bestNY, bestEdge
 end
 
 -- Clip an edge (incident) against a side plane defined by (ref_v, ref_n).
@@ -325,18 +406,19 @@ local function clip_segment(
 	return p1x, p1y, cx, cy, 2
 end
 
--- Returns world-space vertices of a polygon bodelta_Y
-local function world_verts(self: RigidBody): { number }
+-- Returns world-space vertices of a polygon
+local function world_verts(self: RigidBody): {number}
 	local angle = self.Angle
 	local position_X, position_Y = self.Position_X, self.Position_Y
-	local shape = self.Shape
+	local vertices = self.Vertices
+	local length = #vertices
 
 	local cosine, sine = math_cos(angle), math_sin(angle)
 
-	local out: { number } = {}
-	for index = 1, #shape, 2 do
-		local local_X, local_Y= shape[index], shape[index + 1]
-		out[#out + 1], out[#out + 2] = cosine * local_X - sine * local_Y+ position_X, sine * local_X + cosine * local_Y+ position_Y
+	local out: {number} = table_create(length, 0)
+	for index = 1, length, 2 do
+		local local_X, local_Y = vertices[index], vertices[index + 1]
+		out[index], out[index + 1] = cosine * local_X - sine * local_Y + position_X, sine * local_X + cosine * local_Y + position_Y
 	end
 
 	return out
@@ -345,125 +427,144 @@ end
 
 -- -- Methods
 
-function Module.collide_Polygon(a: RigidBody, b: RigidBody, manifold: Manifold): boolean
-	local va = world_verts(a)
-	local vb = world_verts(b)
+--[[
+	Check collision between two polygons.
+	returns: collided
+]]
+function Module.collide_Polygon(self: RigidBody, polygon_B: RigidBody, manifold: Manifold): boolean
+	-- === Build world verts ===
+	local va = world_verts(self)
+	local vb = world_verts(polygon_B)
 
-	local sep_a, nx_a, ny_a = best_axis(va, vb)
-	if sep_a > 0 then
-		return false
-	end
-	
-	local sep_b, nx_b, ny_b = best_axis(vb, va)
-	if sep_b > 0 then
-		return false
-	end
+	-- === SAT ===
+	local sepA, nxA, nyA, edgeA = findAxis(va, vb)
+	if sepA > 0 then return false end
 
-	local contact_Normal_X, contact_Normal_Y: number, number
-	if sep_a > sep_b then
-		contact_Normal_X, contact_Normal_Y = nx_a, ny_a
+	local sepB, nxB, nyB, edgeB = findAxis(vb, va)
+	if sepB > 0 then return false end
+
+	-- === Choose reference face ===
+	local refVerts, incVerts
+	local refEdge
+	local nx, ny
+
+	if sepA > sepB then
+		refVerts = va
+		incVerts = vb
+		refEdge = edgeA
+		nx, ny = nxA, nyA
 	else
-		contact_Normal_X, contact_Normal_Y = -nx_b, -ny_b
+		refVerts = vb
+		incVerts = va
+		refEdge = edgeB
+		nx, ny = -nxB, -nyB
 	end
 
-	-- Ensure normal points A→B
-	local delta_X = b.Position_X - a.Position_X
-	local delta_Y = b.Position_Y - a.Position_Y
-	if delta_X * contact_Normal_X + delta_Y * contact_Normal_Y < 0 then
-		contact_Normal_X = -contact_Normal_X
-		contact_Normal_Y = -contact_Normal_Y
+	-- Ensure normal points A → B
+	local dx = polygon_B.Position_X - self.Position_X
+	local dy = polygon_B.Position_Y - self.Position_Y
+	if dx*nx + dy*ny < 0 then
+		nx, ny = -nx, -ny
 	end
 
-	-- Find incident edge on B (most anti-parallel to normal)
-	local nb = #vb
-	local best_dot = math_Huge
-	local inc_i = 1
-	local ii = 1
-	while ii < nb do
-		local ni2 = if ii + 2 <= nb then ii + 2 else 1
-		local ex = vb[ni2] - vb[ii]
-		local ey = vb[ni2 + 1] - vb[ii + 1]
-		local len = math_sqrt(ex * ex + ey * ey)
-		local q1, q2 = ex / len, ey / len
-		local d = q1 * contact_Normal_X + q2 * contact_Normal_Y
-		if d < best_dot then
-			best_dot = d
-			inc_i = ii
+	-- === Reference edge ===
+	local i1 = refEdge
+	local i2 = (i1 + 2 <= #refVerts) and i1 + 2 or 1
+
+	local v1x, v1y = refVerts[i1], refVerts[i1+1]
+	local v2x, v2y = refVerts[i2], refVerts[i2+1]
+
+	local ex = v2x - v1x
+	local ey = v2y - v1y
+	local len = math_sqrt(ex*ex + ey*ey)
+	ex /= len
+	ey /= len
+
+	local tx, ty = ex, ey
+
+	-- === Incident edge ===
+	local bestDot = math.huge
+	local incIndex = 1
+
+	for i = 1, #incVerts, 2 do
+		local j = (i + 2 <= #incVerts) and i + 2 or 1
+		local ex2 = incVerts[j] - incVerts[i]
+		local ey2 = incVerts[j + 1] - incVerts[i + 1]
+
+		local l = math_sqrt(ex2*ex2 + ey2*ey2)
+		if l < 1e-8 then continue end
+
+		ex2 /= l
+		ey2 /= l
+
+		local d = ex2*nx + ey2*ny
+		if d < bestDot then
+			bestDot = d
+			incIndex = i
 		end
-		ii += 2
-	end
-	local ni2 = if inc_i + 2 <= nb then inc_i + 2 else 1
-	local ip1x, ip1y = vb[inc_i], vb[inc_i + 1]
-	local ip2x, ip2y = vb[ni2], vb[ni2 + 1]
-
-	-- Side planes from reference face
-	local tang_x = contact_Normal_Y; local tang_y = -contact_Normal_X -- tangent along reference edge
-	local na = #va
-	local ref_i = 1
-	local best_ref = -math_Huge
-	local ri = 1
-	while ri < na do
-		local q1, q2 = va[ri], va[ri + 1]
-		local d = q1 * contact_Normal_X + q2 * contact_Normal_Y
-		if d > best_ref then best_ref = d; ref_i = ri end
-		ri += 2
-	end
-	local ref_x, ref_y = va[ref_i], va[ref_i + 1]
-	local offset1 = ref_x * tang_x + ref_y * tang_y
-	local offset2 = ref_x * tang_x + ref_y * tang_y -- opposite side
-
-	local c1, count1: number
-	ip1x, ip1y, ip2x, ip2y, count1 = clip_segment(ip1x, ip1y, ip2x, ip2y, tang_x, tang_y, offset1)
-	if count1 < 2 then
-		return false
-	end
-	ip1x, ip1y, ip2x, ip2y, count1 = clip_segment(ip1x, ip1y, ip2x, ip2y, -tang_x, -tang_y, offset2)
-	if count1 < 2 then
-		return false
 	end
 
-	-- Keep points below reference face
-	local ref_dot = ref_x * contact_Normal_X + ref_y * contact_Normal_Y
-	local pen1 = ref_dot - ip1x * contact_Normal_X - ip1y * contact_Normal_Y
-	local pen2 = ref_dot - ip2x * contact_Normal_X - ip2y * contact_Normal_Y
-	local count = 0
+	local j = (incIndex + 2 <= #incVerts) and incIndex + 2 or 1
+	local p1x, p1y = incVerts[incIndex], incVerts[incIndex+1]
+	local p2x, p2y = incVerts[j], incVerts[j+1]
 
-	manifold.Contact_Count = 0
+	-- === Clip ===
+	local offset1 = v1x * tx + v1y * ty
+	local offset2 = v2x * tx + v2y * ty
+
+	local count: number
+	p1x, p1y, p2x, p2y, count = clip_segment(p1x, p1y, p2x, p2y,  tx,  ty, offset1)
+	if count < 2 then return false end
+
+	p1x, p1y, p2x, p2y, count = clip_segment(p1x, p1y, p2x, p2y, -tx, -ty, -offset2)
+	if count < 2 then return false end
+
+	-- === Final contacts ===
+	local refDot = v1x * nx + v1y * ny
+
+	local pen1 = refDot - (p1x * nx + p1y*ny)
+	local pen2 = refDot - (p2x * nx + p2y*ny)
+
+	local countFinal = 0
+
 	if pen1 >= 0 then
-		manifold.Contact1_X, manifold.Contact1_Y = ip1x, ip1y
-		count += 1
-	end
-	if pen2 >= 0 then
-		if count == 0 then
-			manifold.Contact1_X, manifold.Contact1_Y = ip2x, ip2y
-		else
-			manifold.Contact2_X, manifold.Contact2_Y = ip2x, ip2y
-		end
-		count += 1
-	end
-	if count == 0 then
-		return false
+		manifold.Contact1_X = p1x
+		manifold.Contact1_Y = p1y
+		countFinal += 1
 	end
 
-	manifold.Contact_Count = count
-	manifold.Penetration = if pen1 > pen2 then pen1 else pen2
-	manifold.Contact_Normal_X = contact_Normal_X
-	manifold.Contact_Normal_Y = contact_Normal_Y
+	if pen2 >= 0 then
+		if countFinal == 0 then
+			manifold.Contact1_X = p2x
+			manifold.Contact1_Y = p2y
+		else
+			manifold.Contact2_X = p2x
+			manifold.Contact2_Y = p2y
+		end
+		countFinal += 1
+	end
+
+	if countFinal == 0 then return false end
+
+	manifold.Contact_Count = countFinal
+	manifold.Contact_Normal_X = nx
+	manifold.Contact_Normal_Y = ny
+	manifold.Penetration = math.max(pen1, pen2)
 
 	return true
 end
 
 function Module.update_Polygon_AABB(self: RigidBody)
 	local angle = self.Angle
-	local shape = self.Shape
+	local vertices = self.Vertices
 	local position_X, position_Y = self.Position_X, self.Position_Y
 
 	local cosine, sine = math_cos(angle), math_sin(angle)
 	local min_x, min_y = math_Huge, math_Huge
 	local max_x, max_y = -math_Huge, -math_Huge
 
-	for index = 1, #shape, 2 do
-		local local_X, local_Y= shape[index], shape[index + 1]
+	for index = 1, #vertices, 2 do
+		local local_X, local_Y = vertices[index], vertices[index + 1]
 
 		local wx, wy = cosine * local_X - sine * local_Y + position_X, sine * local_X + cosine * local_Y + position_Y
 		if wx < min_x then min_x = wx end
